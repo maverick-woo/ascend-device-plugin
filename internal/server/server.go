@@ -382,7 +382,7 @@ func (ps *PluginServer) Allocate(ctx context.Context, reqs *v1beta1.AllocateRequ
 			return nil, fmt.Errorf("device number not matched: annotation has %d, request has %d", len(containerDevs), len(req.DevicesIds))
 		}
 
-		resp, err := ps.buildContainerAllocateResponse(pod, ctrName, containerDevs, rtInfoLookup, req.DevicesIds)
+		resp, err := ps.buildContainerAllocateResponse(pod, ctrName, containerDevs, rtInfoLookup)
 		if err != nil {
 			return nil, fmt.Errorf("build container allocate response: %w", err)
 		}

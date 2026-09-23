@@ -25,7 +25,7 @@ func init() {
 }
 
 // buildContainerAllocateResponse builds the allocate response for a single container.
-func (ps *PluginServer) buildContainerAllocateResponse(pod *v1.Pod, ctrName string, containerDevs device.ContainerDevices, rtInfoLookup map[string]RuntimeInfo, requestedIDs ...[]string) (*v1beta1.ContainerAllocateResponse, error) {
+func (ps *PluginServer) buildContainerAllocateResponse(pod *v1.Pod, ctrName string, containerDevs device.ContainerDevices, rtInfoLookup map[string]RuntimeInfo) (*v1beta1.ContainerAllocateResponse, error) {
 	resp := &v1beta1.ContainerAllocateResponse{}
 
 	var (
@@ -80,10 +80,6 @@ func (ps *PluginServer) buildContainerAllocateResponse(pod *v1.Pod, ctrName stri
 		if err := ps.ensureENPUSingleDieMode(); err != nil {
 			return nil, err
 		}
-		requestedID := ""
-		if len(requestedIDs) > 0 && len(requestedIDs[0]) > 0 {
-			requestedID = requestedIDs[0][0]
-		}
 		policy, err := enpuPolicy(pod, managerENPUPolicy(ps.mgr))
 		if err != nil {
 			return nil, err
@@ -105,7 +101,7 @@ func (ps *PluginServer) buildContainerAllocateResponse(pod *v1.Pod, ctrName stri
 			}
 			configPath = managerConfigPath(allocation)
 		} else {
-			configPath, err = writeENPUConfig(pod, ctrName, dev, info, requestedID, policy)
+			configPath, err = ps.writeENPUConfig(pod, ctrName, dev, info, policy)
 			if err != nil {
 				return nil, err
 			}

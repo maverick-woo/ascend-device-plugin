@@ -106,7 +106,7 @@ func TestAllocateENPUSingleDiePrerequisite(t *testing.T) {
 			core := int32(20)
 			resp, err := ps.buildContainerAllocateResponse(pod, "test",
 				device.ContainerDevices{{UUID: dev.UUID, Type: tc.commonWord, Usedmem: int32(memory), Usedcores: core}},
-				map[string]RuntimeInfo{dev.UUID: {UUID: dev.UUID, Memory: &memory, Core: &core}}, []string{"die-15-3"})
+				map[string]RuntimeInfo{dev.UUID: {UUID: dev.UUID, Memory: &memory, Core: &core}})
 			if queries != tc.wantQueries {
 				t.Fatalf("npu-smi queries=%d; want %d", queries, tc.wantQueries)
 			}

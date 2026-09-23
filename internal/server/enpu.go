@@ -8,9 +8,7 @@ package server
 
 import (
 	"fmt"
-	"hash/fnv"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"unicode"
@@ -69,19 +67,6 @@ func enpuShmID(uuid string, physicalID int32) string {
 		name = name[:120]
 	}
 	return name
-}
-
-func enpuVirtualID(requestedID string, fallback string) int {
-	for _, value := range []string{requestedID, fallback} {
-		if idx := strings.LastIndexByte(value, '-'); idx >= 0 {
-			if n, err := strconv.Atoi(value[idx+1:]); err == nil && n >= 0 && n < 100 {
-				return n
-			}
-		}
-	}
-	h := fnv.New32a()
-	_, _ = h.Write([]byte(fallback))
-	return int(h.Sum32() % 100)
 }
 
 func enpuPolicy(pod *v1.Pod, defaults ...string) (int, error) {
@@ -265,7 +250,7 @@ func enpuDeviceSpecs(devices []*manager.Device) []*v1beta1.DeviceSpec {
 	return result
 }
 
-func writeENPUConfig(pod *v1.Pod, ctrName string, dev *manager.Device, info RuntimeInfo, requestedID string, policy int) (string, error) {
+func (ps *PluginServer) writeENPUConfig(pod *v1.Pod, ctrName string, dev *manager.Device, info RuntimeInfo, policy int) (string, error) {
 	if dev == nil {
 		return "", fmt.Errorf("ENPU device is nil")
 	}
@@ -277,35 +262,27 @@ func writeENPUConfig(pod *v1.Pod, ctrName string, dev *manager.Device, info Runt
 	if err != nil {
 		return "", err
 	}
-	uid := ""
-	if pod != nil {
-		uid = string(pod.UID)
-		if uid == "" {
-			uid = pod.Namespace + "-" + pod.Name
-		}
+	if pod == nil || pod.UID == "" || ctrName == "" {
+		return "", fmt.Errorf("ENPU allocation requires a Pod UID and container name")
 	}
-	uid = sanitizeENPUName(uid)
-	if uid == "" {
-		uid = "pod"
-	}
-	container := sanitizeENPUName(ctrName)
-	if container == "" {
-		container = "container"
+	uid, container := string(pod.UID), ctrName
+	if sanitizeENPUName(uid) != uid || strings.Contains(uid, "_") || sanitizeENPUName(container) != container {
+		return "", fmt.Errorf("invalid ENPU allocation identity %q/%q", uid, container)
 	}
 	root := enpuHostPath("ENPU_CONFIG_ROOT", defaultENPUConfigRoot)
-	dir := filepath.Join(root, uid+"_"+container)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return "", fmt.Errorf("create ENPU config directory %s: %w", dir, err)
-	}
-	configPath := filepath.Join(dir, "npu_info.config")
 	physicalID := enpuPhysicalID(dev)
-	contents := fmt.Sprintf("physical-npu-id=%d\nvirtual-npu-id=%d\naicore-quota=%d\nmemory-request=%d\nmemory-limit=%d\nmemory-quota=%d\nshm-id=%s\nscheduling-policy=%d\n",
-		physicalID, enpuVirtualID(requestedID, uid+"-"+container), core, request, limit, memory, enpuShmID(dev.UUID, physicalID), policy)
-	if err := os.WriteFile(configPath, []byte(contents), 0644); err != nil {
-		return "", fmt.Errorf("write ENPU config %s: %w", configPath, err)
+	contents := func(slot int) string {
+		return fmt.Sprintf("physical-npu-id=%d\nvirtual-npu-id=%d\naicore-quota=%d\nmemory-request=%d\nmemory-limit=%d\nmemory-quota=%d\nshm-id=%s\nscheduling-policy=%d\n",
+			physicalID, slot, core, request, limit, memory, enpuShmID(dev.UUID, physicalID), policy)
 	}
-	klog.V(4).Infof("wrote ENPU config for %s/%s at %s: physical=%d virtual=%d core=%d memoryRequest=%d memoryLimit=%d legacyMemory=%d policy=%d",
-		uid, container, configPath, physicalID, enpuVirtualID(requestedID, uid+"-"+container), core, request, limit, memory, policy)
+	configPath, err := reserveENPUConfig(root, uid, container, physicalID, contents, func() (map[string]bool, error) {
+		return enpuLivePodUIDs(ps.nodeName)
+	})
+	if err != nil {
+		return "", err
+	}
+	klog.V(4).Infof("reserved ENPU config for %s/%s at %s: physical=%d core=%d memoryRequest=%d memoryLimit=%d policy=%d",
+		uid, container, configPath, physicalID, core, request, limit, policy)
 	return configPath, nil
 }
 
