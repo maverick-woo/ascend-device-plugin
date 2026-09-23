@@ -94,6 +94,10 @@ spec:
               name: hami-shared-region
             - mountPath: /usr/local/hami-vnpu-core
               name: hami-vnpu-core
+            - mountPath: /var/lib/hami-enpu
+              name: enpu-config
+            - mountPath: /usr/local/enpu/vcann-rt
+              name: enpu-runtime
             - name: ascend-config
               mountPath: /device-config.yaml
               subPath: device-config.yaml
@@ -107,6 +111,13 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
+            - name: ENPU_CONFIG_ROOT
+              value: /var/lib/hami-enpu
+            # Keep ENPU device visibility limited to the die selected by
+            # ASCEND_VISIBLE_DEVICES. Set true only for diagnostic nodes that
+            # require full /dev/davinci enumeration.
+            - name: ENPU_EXPOSE_ALL_DEVICES
+              value: "false"
       volumes:
         - name: device-plugin
           hostPath:
@@ -135,6 +146,14 @@ spec:
         - name: hami-vnpu-core
           hostPath:
             path: /usr/local/hami-vnpu-core
+            type: DirectoryOrCreate
+        - name: enpu-config
+          hostPath:
+            path: /var/lib/hami-enpu
+            type: DirectoryOrCreate
+        - name: enpu-runtime
+          hostPath:
+            path: /usr/local/enpu/vcann-rt
             type: DirectoryOrCreate
         - name: ascend-config
           configMap:
