@@ -48,7 +48,7 @@ const (
 	VNPUModeHamiCore           = "hami-core"
 	VNPUModeENPU               = "enpu"
 	VNPUNodeSelectorAnnotation = "hami-vnpu-core"
-	VNPUNodeENPUAnnotation     = "hami-enpu"
+	VNPUNodeENPUAnnotation     = "hami.io/enpu"
 )
 
 var (
