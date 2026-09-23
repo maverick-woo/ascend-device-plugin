@@ -20,6 +20,7 @@ mem-swap 还需阅读所使用版本源码中的 `ubs-virt-enpu/enpu-manager/REA
 | [soft-slicing.yaml](soft-slicing.yaml) | 普通软切分：PyTorch 单设备、16 GiB、20% 算力配额 |
 | [mem-swap-values.yaml](mem-swap-values.yaml) | 超分附加配置：连接本节点 manager、挂载生成配置的目录 |
 | [mem-swap.yaml](mem-swap.yaml) | 超分：单实例 vLLM，256 MiB request、64 GiB limit，TP1/eager |
+| [podmonitor.yaml](podmonitor.yaml) | 可选、手动应用的 Prometheus Operator 抓取配置 |
 
 这些文件是配置模板。应用前替换镜像、节点名、manager 地址、模型路径和 PVC；`registry.example.com` 与 `192.0.2.10` 都是占位值。示例默认使用 `Ascend910C`，其他型号请按下面的型号表修改资源名和显存预算。
 
@@ -72,6 +73,39 @@ helm upgrade <existing-plugin-release> ./charts/ascend-device-plugin \
 多个实例共享同一 DIE 时，复制 Pod 示例并修改名称，按需在各 Pod 设置同一个真实的 `hami.io/use-Ascend910C-uuid`；仅使用相同资源名并不保证调度到同一 DIE。每 Pod 保持一个 ENPU 业务容器。接近整 DIE 容量的实例应依次初始化，确认已有实例已换出并释放 HBM 后再加载下一个；不要假定三个大模型同时启动一定能完成。正常请求访问由 runtime/manager 协调换入换出，不等同于暂停容器或 vLLM 的 sleep API。避免通过 SIGSTOP/docker pause 控制交换，也不要仅凭管理 API 返回成功判断交换完成。
 
 当前接入未自动回收 Pod 退出后的 manager 分配登记；清理时先确认对应容器已退出，再按官方 API 释放准确的 Pod UID/容器名。不要删除其他存活实例的配置或共享内存。
+
+## 监控指标
+
+节点启用 ENPU 后，插件在原有 `:9395/metrics` 端点（端口名 `monitorport`）提供 Prometheus 指标，无需新增环境变量。静态 DaemonSet 和 chart 将宿主机 `/proc` 只读挂载到 `/host/proc`，沿用已有 privileged 安全配置。采集无需 `hostPID`、`pods/exec` 权限，也不会在业务容器中执行命令；自定义部署须保留该挂载和原有 ENPU 配置目录挂载。
+
+采集器读取 DCMI 进程 HBM 数据，通过宿主机 PID 的 cgroup 匹配当前 Pod/container ID，并核对物理设备与分配 UUID，同一容器的进程用量求和。除特别说明外，容器指标具有 `namespace`、`pod`、`container`、`vdevice_index`（当前为 `0`）、`device_uuid` 五个标签。下表显存值均以 bytes 为单位。
+
+| 指标 | 含义 |
+| --- | --- |
+| `hami_vgpu_memory_used_bytes` | 按 DCMI 进程数据归属到容器的实际 HBM 驻留量 |
+| `hami_vgpu_memory_limit_bytes` | ENPU 配置的显存上限 |
+| `hami_enpu_memory_request_bytes` | 配置中由 HAMi 预留的显存量 |
+| `hami_enpu_aicore_quota_percent` | 配置的算力份额，不是实测利用率；约束方式取决于策略 |
+| `hami_enpu_allocation_info` | 值为 `1`；另加 `physical_device_id`、`virtual_device_id`、`policy` 标签 |
+| `hami_enpu_memory_collection_success` | 每容器显存归属状态：成功为 `1`，失败为 `0` |
+| `hami_enpu_config_collection_success` | 采集器全局状态，无指标标签：所有运行中 ENPU 分配配置均读取成功为 `1`，否则为 `0` |
+| `hami_enpu_device_collection_success` | 采集器全局状态，无指标标签：设备采集成功为 `1`，否则为 `0` |
+| `hami_host_gpu_memory_used_bytes` | 整个 DIE 的 HBM 用量；标签为 `device_index`、`device_uuid`、`device_type` |
+| `hami_host_gpu_utilization_ratio` | 整个 DIE 的 AI Core 利用率，取值 **0–100**，标签同上 |
+
+缺失或失败的数据不会填成零：对应 success 指标变为 `0`，受影响的样本不输出。配置读取失败时，该分配的全部指标都可能缺失，因此应同时检查全局状态和每容器状态；成功采集得到的零值仍是有效数据。
+
+本接入不提供 ENPU 每 Pod 算力利用率，不会将整 DIE 利用率复制给每个 Pod，配置配额也不是所有策略下的严格上限。mem-swap 配置支持不同的显存 request 和 limit，但实测用量仅包含 HBM 驻留，不包含换出到 CPU 的字节数或 sleep 状态；该端点不是 enpu-manager exporter。仅启用 hami-core 及原有 template 路径时保持原采集行为；同时启用 hami-core 与 ENPU 时，整设备指标由 DCMI 提供且只输出一次。
+
+手动检查运行时可在 ENPU 业务容器内执行 `/usr/local/enpu/vcann-rt/tools/enpu-monitor`。上游 release **1.0.0** 向 stderr 输出三项：AI Core 配额（%）、显存上限和显存用量；显存字段虽标为 `MB`，实际为整数 MiB。它没有 HTTP 端点或每 Pod 利用率输出；`best-effort` 下 CLI 配额显示 `0` 不代表 HAMi 配置了零配额。插件采集器不会调用或解析该 CLI。
+
+### 可选 Prometheus Operator 发现配置
+
+[podmonitor.yaml](podmonitor.yaml) 仅供手动应用，chart 不默认安装，也不默认依赖 PodMonitor CRD。已安装 Prometheus Operator 时，先调整示例，再执行 `kubectl apply -f examples/enpu/podmonitor.yaml`：
+
+- 将其命名空间和 `spec.namespaceSelector.matchNames` 改为插件命名空间。Pod selector 中 `app.kubernetes.io/instance` 对应 Helm release，`app.kubernetes.io/name` 对应 chart 名或 `nameOverride`，保留 `app.kubernetes.io/component: hami-ascend-device-plugin`。这些是 chart 的 Pod 标签，不是 DaemonSet 名；静态部署应使用实际 Pod 标签。
+- PodMonitor 的 metadata 标签与所在命名空间须匹配 Prometheus 的 `podMonitorSelector` 和 `podMonitorNamespaceSelector`。示例的 `release: prometheus` 是占位值，不是插件 release 标签。
+- 端点使用 `monitorport`（9395）、`/metrics` 和 `honorLabels: true`，以保留业务标签。若 Prometheus 设置 `overrideHonorLabels: true`，会覆盖该选项：冲突的原始业务指标标签改名为 `exported_*`，抓取目标的 `namespace`、`pod` 等标签仍指向被抓取的插件 Pod，查询时须相应处理。见 [Prometheus Operator API 文档](https://prometheus-operator.dev/docs/api-reference/api/)。
 
 ## NPU 型号与 ConfigMap
 

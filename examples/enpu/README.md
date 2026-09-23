@@ -20,6 +20,7 @@ The upstream Kubernetes example uses MindCluster/Volcano `AscendJob` resources. 
 | [soft-slicing.yaml](soft-slicing.yaml) | Single-device PyTorch, 16 GiB memory and a 20% compute quota |
 | [mem-swap-values.yaml](mem-swap-values.yaml) | Additional manager endpoint and generated configuration directory |
 | [mem-swap.yaml](mem-swap.yaml) | One vLLM instance, 256 MiB request, 64 GiB limit, TP1/eager |
+| [podmonitor.yaml](podmonitor.yaml) | Optional, manually applied Prometheus Operator scrape configuration |
 
 These are configuration templates. Replace the images, node name, manager address, model path and PVC before applying them; `registry.example.com` and `192.0.2.10` are placeholders. The examples use `Ascend910C`; adjust resource names and memory budgets for other models as described below.
 
@@ -72,6 +73,39 @@ After replacing the image, model PVC and path, run `kubectl apply -f examples/en
 To share one DIE across instances, copy the Pod with distinct names and, when needed, set the same actual `hami.io/use-Ascend910C-uuid` on each. Equal resource names alone do not ensure placement on one DIE. Keep one ENPU workload container per Pod. Initialize instances approaching the DIE's capacity sequentially, confirming HBM release from earlier instances before loading the next. Do not assume that three large models can initialize concurrently. Runtime/manager coordinate swapping on workload access; this is different from pausing containers or invoking vLLM's sleep API. Avoid SIGSTOP/docker pause for swap control, and do not treat a management API acknowledgement alone as proof of completed exchange.
 
 The current integration does not automatically release manager allocation records after Pod exit. Confirm the container has exited, then use the official API to release the exact Pod UID/container pair. Preserve configurations and shared memory belonging to live instances.
+
+## Metrics
+
+When ENPU is enabled on a node, the plugin serves Prometheus metrics at its existing `:9395/metrics` endpoint (`monitorport`). No additional environment variable is needed. The static DaemonSet and chart mount host `/proc` read-only at `/host/proc`, retaining the existing privileged security context. Collection does not require `hostPID`, `pods/exec` permission, or commands inside workload containers. Custom deployments must include that mount and the existing ENPU configuration mounts.
+
+The collector reads DCMI process HBM usage and matches host PIDs through their cgroups to current Pod/container IDs, checking the physical device and allocated UUID. It aggregates processes belonging to the same container. Container metrics use `namespace`, `pod`, `container`, `vdevice_index` (currently `0`) and `device_uuid` labels unless stated otherwise. Memory values below are bytes.
+
+| Metric | Meaning |
+| --- | --- |
+| `hami_vgpu_memory_used_bytes` | Container's resident HBM, attributed from DCMI process memory |
+| `hami_vgpu_memory_limit_bytes` | Configured ENPU memory limit |
+| `hami_enpu_memory_request_bytes` | Configured memory reservation used by HAMi |
+| `hami_enpu_aicore_quota_percent` | Configured compute share, not measured utilization; enforcement depends on the policy |
+| `hami_enpu_allocation_info` | Value `1`; adds `physical_device_id`, `virtual_device_id` and `policy` labels |
+| `hami_enpu_memory_collection_success` | Per-container attribution status: `1` on success, `0` on failure |
+| `hami_enpu_config_collection_success` | Collector-wide status, with no metric labels: `1` if all running ENPU allocations were read successfully, otherwise `0` |
+| `hami_enpu_device_collection_success` | Collector-wide status, with no metric labels: `1` if device collection succeeded, otherwise `0` |
+| `hami_host_gpu_memory_used_bytes` | Whole-DIE HBM usage; labels are `device_index`, `device_uuid`, `device_type` |
+| `hami_host_gpu_utilization_ratio` | Whole-DIE AI Core utilization on a **0–100** scale, with the same device labels |
+
+Missing or failed measurements are not replaced with zero: the relevant success metric becomes `0` and affected samples are omitted. A configuration failure can omit all metrics for that allocation; check the collector-wide status as well as per-container status. A successfully measured zero remains valid.
+
+There is no ENPU per-Pod compute utilization metric in this integration. Whole-DIE utilization is not copied onto each Pod, and the configured quota is not a strict ceiling under every policy. Mem-swap configurations support distinct memory request and limit values, but measured usage includes only resident HBM, not swapped-out CPU bytes or sleep state. This endpoint is not an enpu-manager exporter. The existing hami-core-only and template paths retain their collection behavior; when both hami-core and ENPU are enabled, whole-device metrics come from DCMI and are exported once.
+
+For a manual runtime check, run `/usr/local/enpu/vcann-rt/tools/enpu-monitor` inside an ENPU workload container. In upstream release **1.0.0**, it prints three fields to stderr: AI Core quota (%), memory limit and memory usage. Its memory fields are integer MiB despite the `MB` labels; it has no HTTP endpoint or per-Pod utilization output. Under `best-effort`, a CLI quota of `0` does not mean HAMi configured a zero quota. The plugin collector does not invoke or parse this CLI.
+
+### Optional Prometheus Operator discovery
+
+[podmonitor.yaml](podmonitor.yaml) is a manual example, not installed by the chart; the plugin has no default PodMonitor CRD dependency. With Prometheus Operator installed, adjust the example before running `kubectl apply -f examples/enpu/podmonitor.yaml`:
+
+- Set its namespace and `spec.namespaceSelector.matchNames` to the plugin namespace. Match the Pod selector's `app.kubernetes.io/instance` to the Helm release and `app.kubernetes.io/name` to the chart name (or `nameOverride`); keep `app.kubernetes.io/component: hami-ascend-device-plugin`. These are the chart's Pod labels, not the DaemonSet name. For a static deployment, use its actual Pod labels.
+- Match the PodMonitor's metadata labels and namespace to Prometheus's `podMonitorSelector` and `podMonitorNamespaceSelector`. The example `release: prometheus` is a placeholder, not a plugin release label.
+- The endpoint uses `monitorport` (9395), `/metrics` and `honorLabels: true` to preserve workload labels. Prometheus `overrideHonorLabels: true` overrides this: conflicting original workload metric labels become `exported_*`, while target labels such as `namespace` and `pod` still identify the scraped plugin Pod. Account for that in queries. See the [Prometheus Operator API reference](https://prometheus-operator.dev/docs/api-reference/api/).
 
 ## NPU models and ConfigMap
 
