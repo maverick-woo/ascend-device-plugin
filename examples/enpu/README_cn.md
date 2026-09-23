@@ -26,9 +26,11 @@ mem-swap 还需阅读所使用版本源码中的 `ubs-virt-enpu/enpu-manager/REA
 ## 部署前提与启用方式
 
 1. 部署包含 ENPU 适配的 HAMi scheduler 和 ascend-device-plugin。沿用现有 release 镜像编译、打包流程，将对应版本的 `libvruntime.so`、`enpu-monitor`、`ld.so.preload` 放入 device-plugin 镜像；插件安装到宿主机 `/usr/local/enpu/vcann-rt` 并注入业务容器。构建环境可参考官方文档中的预编译镜像，但该镜像不等于已经包含所需版本运行库的业务镜像。
-2. 按官方文档配置 `device-share`，部署 ascend-docker-runtime 和 `ascend` RuntimeClass。业务镜像需要匹配的 CANN，并提供可执行的 `/usr/bin/systemd-detect-virt` 及其依赖。PyTorch 示例另需 `torch_npu`，vLLM 示例另需 vLLM-Ascend。
+2. 管理员负责在节点安装 Ascend 驱动，在业务镜像中安装兼容版本的 CANN，按官方文档配置 `device-share`，并部署 ascend-docker-runtime 和 `ascend` RuntimeClass。业务镜像还需提供可执行的 `/usr/bin/systemd-detect-virt` 及其依赖。PyTorch 示例另需 `torch_npu`，vLLM 示例另需 vLLM-Ascend。
 3. 本适配在 A3/910C 按物理 DIE 分配，当前路径要求节点为 `INDEP_POLICY`。这是本适配采用的单 DIE 部署方式；[MindCluster 官方软切分说明](https://www.hiascend.com/document/detail/en/mindcluster/2610/clustersched/schedulingug/docs/en/scheduling/usage/virtual_instance/virtual_instance_with_vcann_rt/01_soft_allocation_scheduling_inference.md) 对应 `useSingleDieMode=true`，不是“所有 mem-swap 实现都不支持联合模式”的结论。节点模式由管理员按官方说明配置，插件只检查、不自动更改。
 4. scheduler 与 plugin 共用完整的 `hami-scheduler-device` ConfigMap，保证 `vnpus.configs` 的型号、资源名和 `vnpus.enpuPolicy` 一致。示例使用节点级 `enpu: true`；插件会注册节点能力供 scheduler 识别，不必把整个集群的 `vnpus.enpu` 改成 `true`。
+
+插件复用内容相同的运行库文件；已有文件与镜像内文件内容不同时，插件启动失败。更换运行库版本前，按[升级与回滚流程](../../enpu-runtime-assets/README.md)停止 ENPU 业务、暂停插件，只备份并移走这三个 ENPU 运行库文件，再部署新镜像。保留原有 hami-vnpu-core 文件。
 
 将 [device-plugin-values.yaml](device-plugin-values.yaml) 合并到现有插件 chart 的 values，保留现有镜像、节点选择及其他设置。目标节点须匹配插件的 `nodeSelector`（默认 `ascend=on`）；`nodeConfig` 本身不会给节点加标签。Pod 中的 `schedulerName: hami-scheduler` 也应与实际 HAMi 配置一致。`nodeConfig` 是整段 YAML 字符串，Helm 会整段替换；必须保留已有节点条目，仅追加或修改选定的 ENPU 节点。节点条目中的 `hami-vnpu-core` 应显式填写，省略也会覆盖全局值为 `false`。
 
@@ -45,6 +47,8 @@ helm upgrade <existing-plugin-release> ./charts/ascend-device-plugin \
 ## 普通软切分
 
 修改镜像后执行 `kubectl apply -f examples/enpu/soft-slicing.yaml`，用 `kubectl logs enpu-soft-slicing` 查看输出。无需配置 manager；`enpu.managerURL` 留空时，插件自行生成每容器配置，显存 request 与 limit 都等于 `-memory` 配额。
+
+普通 ENPU 模式的 `enpu.configRoot`（默认 `/var/lib/hami-enpu`）记录每个 Pod UID/容器在选中 DIE 上的独立虚拟槽位，插件重启时必须保留该目录。只有 Pod 已从 Kubernetes API 删除，且 kubelet 已释放其持久分配记录，后续分配才能回收槽位。API 或 checkpoint 不可读取、checkpoint 格式不受支持时，插件保留原有记录。manager 分配仍按下方 mem-swap 章节说明管理生命周期。
 
 `huawei.com/enpu-policy` 支持 `fixed-share`、`elastic`、`best-effort`。同一 DIE 的 ENPU 实例必须使用同一种策略。`fixed-share` 按配额执行时间片，`elastic` 可借用空闲算力，`best-effort` 不按配额限制算力；三者不能都解读为严格的算力上限。`-core` 单位为百分比，取值 1–100，省略为 100；普通显存配额不会因 `best-effort` 而放开。当前每个容器只支持一个物理 DIE，应用使用容器内逻辑设备 `npu:0`。
 

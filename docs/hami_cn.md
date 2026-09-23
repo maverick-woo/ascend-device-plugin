@@ -127,7 +127,9 @@ spec:
 
 硬件与运行时前提请按 [vCANN-RT 官方配置示例](https://docs.openeuler.org/zh/docs/24.03_LTS_SP3/unifiedbus/unifiedbus/ubs-virt/ubs-virt-enpu/vcann-rt/README.html) 准备；节点启用方式、不同型号 ConfigMap 字段和 manager 接入见 [HAMi ENPU 使用说明](../examples/enpu/README_cn.md)。完整 Pod YAML：[普通软切分](../examples/enpu/soft-slicing.yaml)、[mem-swap 显存超分](../examples/enpu/mem-swap.yaml)。A2/910B 使用同一套适配，不需要 A3 的独立 DIE 模式设置；该要求仅适用于 A3/910C。910A 暂不列入 ENPU 支持范围。
 
-`enpu` 使用 ubs-virt-enpu/vCANN-RT 的 runtime hook 实现算力和显存配额。为 Pod 添加 `huawei.com/vnpu-mode: enpu`，并使用现有 HAMi 资源：例如 `huawei.com/Ascend910C: "1"`、对应的 `-memory`（MB）和 `-core`（1–100%）。ENPU 每个容器只支持一个物理 DIE 上的共享份额；省略 `-core` 时按 100% 配置。必须设置 `runtimeClassName: ascend`，并在节点预置 `libvruntime.so`、`enpu-monitor`、`ld.so.preload` 和匹配版本的 CANN/驱动。
+`enpu` 使用 ubs-virt-enpu/vCANN-RT 的 runtime hook 实现算力和显存配额。为 Pod 添加 `huawei.com/vnpu-mode: enpu`，并使用现有 HAMi 资源：例如 `huawei.com/Ascend910C: "1"`、对应的 `-memory`（MB）和 `-core`（1–100%）。ENPU 每个容器只支持一个物理 DIE 上的共享份额；省略 `-core` 时按 100% 配置。必须设置 `runtimeClassName: ascend`。管理员负责在节点安装 Ascend 驱动，并在业务镜像中安装兼容版本的 CANN。
+
+启用 ENPU 后，插件从自身镜像把 `libvruntime.so`、`enpu-monitor` 和 `ld.so.preload` 安装到宿主机 `/usr/local/enpu/vcann-rt`。已有文件内容相同时直接复用；内容不同时拒绝覆盖，插件启动失败。更换版本时遵循[运行库构建、升级与回滚说明](../enpu-runtime-assets/README.md)，先停止 ENPU 业务并暂停插件，再替换运行库文件。保留原有 hami-vnpu-core 文件。
 
 ```yaml
 metadata:
