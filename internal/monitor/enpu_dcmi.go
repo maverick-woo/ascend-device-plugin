@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"ascend-common/devmanager/common"
 	"ascend-common/devmanager/dcmi"
@@ -133,6 +134,20 @@ func enpuProcessStarts(procRoot string) (map[int32]string, error) {
 	return starts, nil
 }
 
+func enpuProcessMissing(err error) bool {
+	return errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ESRCH)
+}
+
+// enpuProcessGone requires a missing PID directory and an accessible proc view.
+func enpuProcessGone(procRoot string, pid int32) bool {
+	_, err := os.Stat(filepath.Join(procRoot, strconv.Itoa(int(pid))))
+	if !enpuProcessMissing(err) {
+		return false
+	}
+	data, err := os.ReadFile(filepath.Join(procRoot, "self", "stat"))
+	return err == nil && len(data) > 0
+}
+
 func enpuContainerMemory(info *common.DevProcessInfo, procRoot string, starts map[int32]string) (map[string]float64, error) {
 	if info == nil || info.ProcNum < 0 || int(info.ProcNum) != len(info.DevProcArray) || info.ProcNum > common.MaxProcNum {
 		return nil, fmt.Errorf("invalid DCMI process list")
@@ -146,14 +161,26 @@ func enpuContainerMemory(info *common.DevProcessInfo, procRoot string, starts ma
 		seen[proc.Pid] = true
 		before, found := starts[proc.Pid]
 		if !found {
+			if enpuProcessGone(procRoot, proc.Pid) {
+				continue
+			}
 			return nil, fmt.Errorf("PID %d appeared during collection", proc.Pid)
 		}
 		container, err := enpuProcessContainer(procRoot, proc.Pid)
 		if err != nil {
+			if enpuProcessMissing(err) && enpuProcessGone(procRoot, proc.Pid) {
+				continue
+			}
 			return nil, err
 		}
 		after, err := enpuProcessStart(procRoot, proc.Pid)
-		if err != nil || after != before {
+		if err != nil {
+			if enpuProcessMissing(err) && enpuProcessGone(procRoot, proc.Pid) {
+				continue
+			}
+			return nil, fmt.Errorf("read stat for PID %d: %w", proc.Pid, err)
+		}
+		if after != before {
 			return nil, fmt.Errorf("PID %d changed during collection", proc.Pid)
 		}
 		if container != "" {

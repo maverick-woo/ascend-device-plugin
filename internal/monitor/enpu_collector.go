@@ -3,6 +3,7 @@ package monitor
 import (
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -85,7 +86,7 @@ func (c *enpuCollector) Collect(ch chan<- prometheus.Metric) {
 	byPhysical := make(map[int]enpuDeviceSample, len(devices))
 	for _, device := range devices {
 		byPhysical[device.PhysicalID] = device
-		values := []string{strconv.Itoa(device.LogicID), device.UUID, formatDeviceType(device.DeviceType)}
+		values := []string{strconv.Itoa(device.LogicID), device.UUID, formatENPUDeviceType(device.DeviceType)}
 		if device.MemoryUsed != nil {
 			ch <- prometheus.MustNewConstMetric(hostGPUdesc, prometheus.GaugeValue, *device.MemoryUsed, values...)
 		}
@@ -110,6 +111,14 @@ func (c *enpuCollector) Collect(ch chan<- prometheus.Metric) {
 			ch <- prometheus.MustNewConstMetric(ctrvGPUdesc, prometheus.GaugeValue, device.MemoryByContainer[allocation.ContainerID], values...)
 		}
 	}
+}
+
+// formatENPUDeviceType normalizes DCMI product and chip names for ENPU host metric labels.
+func formatENPUDeviceType(deviceType string) string {
+	if strings.HasPrefix(deviceType, "Ascend") && !strings.HasPrefix(deviceType, "Ascend-") {
+		deviceType = strings.TrimPrefix(deviceType, "Ascend")
+	}
+	return formatDeviceType(deviceType)
 }
 
 func enpuSuccess(err error) float64 {

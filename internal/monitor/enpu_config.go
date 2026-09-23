@@ -261,7 +261,9 @@ func enpuReadConfig(root, relative string) (map[string]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open ENPU config root: %w", err)
 	}
-	defer directory.Close()
+	defer func() {
+		_ = directory.Close()
+	}()
 	for partial := relative; partial != "."; partial = filepath.Dir(partial) {
 		info, statErr := directory.Lstat(partial)
 		if statErr != nil {
@@ -275,7 +277,9 @@ func enpuReadConfig(root, relative string) (map[string]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
+	defer func() {
+		_ = file.Close()
+	}()
 	info, err := file.Stat()
 	if err != nil {
 		return nil, err

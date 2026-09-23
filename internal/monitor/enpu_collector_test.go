@@ -1,7 +1,9 @@
 package monitor
 
 import (
+	"ascend-common/devmanager/common"
 	"errors"
+	"maps"
 	"math"
 	"os"
 	"path/filepath"
@@ -9,7 +11,6 @@ import (
 	"strings"
 	"testing"
 
-	"ascend-common/devmanager/common"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 )
@@ -31,6 +32,49 @@ func gatherENPU(t *testing.T, collector *enpuCollector) map[string]*dto.MetricFa
 		result[family.GetName()] = family
 	}
 	return result
+}
+
+func TestENPUHostMetricDeviceTypes(t *testing.T) {
+	for _, tc := range []struct {
+		deviceType, want string
+	}{
+		{"Ascend910C", "Ascend-910C"},
+		{"Ascend910_9392", "Ascend-910_9392"},
+		{"Ascend-910C", "Ascend-910C"},
+		{"NVIDIA-A100", "NVIDIA-A100"},
+		{"910C", "Ascend-910C"},
+	} {
+		t.Run(tc.deviceType, func(t *testing.T) {
+			used, utilization := 1500.0, 80.0
+			metrics := gatherENPU(t, &enpuCollector{
+				allocations: func() ([]enpuAllocation, error) { return nil, nil },
+				devices: func([]enpuAllocation) ([]enpuDeviceSample, error) {
+					return []enpuDeviceSample{{LogicID: 3, PhysicalID: 15, UUID: "die-15", DeviceType: tc.deviceType, MemoryUsed: &used, Utilization: &utilization}}, nil
+				},
+			})
+			wantLabels := map[string]string{"device_index": "3", "device_uuid": "die-15", "device_type": tc.want}
+			for name, wantValue := range map[string]float64{
+				"hami_host_gpu_memory_used_bytes": used,
+				"hami_host_gpu_utilization_ratio": utilization,
+			} {
+				family := metrics[name]
+				if family == nil || len(family.Metric) != 1 {
+					t.Fatalf("%s: got %v, want one metric", name, family)
+				}
+				metric := family.Metric[0]
+				if got := metric.GetGauge().GetValue(); got != wantValue {
+					t.Errorf("%s value = %v, want %v", name, got, wantValue)
+				}
+				gotLabels := make(map[string]string)
+				for _, label := range metric.GetLabel() {
+					gotLabels[label.GetName()] = label.GetValue()
+				}
+				if !maps.Equal(gotLabels, wantLabels) {
+					t.Errorf("%s labels = %v, want %v", name, gotLabels, wantLabels)
+				}
+			}
+		})
+	}
 }
 
 func TestENPUContainerMetrics(t *testing.T) {

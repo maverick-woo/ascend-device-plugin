@@ -33,7 +33,9 @@ func enpuProcessContainer(procRoot string, pid int32) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("read cgroup for PID %d: %w", pid, err)
 	}
-	defer f.Close()
+	defer func() {
+		_ = f.Close()
+	}()
 	data, err := io.ReadAll(io.LimitReader(f, enpuCgroupMaxBytes+1))
 	if err != nil {
 		return "", fmt.Errorf("read cgroup for PID %d: %w", pid, err)

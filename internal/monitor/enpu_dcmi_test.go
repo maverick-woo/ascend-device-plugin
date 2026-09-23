@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 
 	"ascend-common/devmanager/common"
@@ -164,6 +165,14 @@ func enpuDCMIWriteProc(t *testing.T, root string, pid int32, container, start st
 	}
 }
 
+func enpuDCMIWriteProcView(t *testing.T, root string) {
+	t.Helper()
+	enpuDCMIWriteProc(t, root, 1, "", "1")
+	if err := os.Symlink("1", filepath.Join(root, "self")); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestReadENPUDeviceStatsMappingAndMemory(t *testing.T) {
 	root := t.TempDir()
 	first, second := strings.Repeat("a", 64), strings.Repeat("b", 64)
@@ -306,7 +315,7 @@ func TestReadENPUDeviceStatsProductFallback(t *testing.T) {
 }
 
 func TestReadENPUDeviceStatsProcessErrors(t *testing.T) {
-	for _, kind := range []string{"query error", "nil process list", "missing proc root", "missing cgroup", "PID appeared", "PID reused"} {
+	for _, kind := range []string{"query error", "nil process list", "missing proc root", "missing cgroup", "malformed cgroup", "missing stat", "malformed stat", "PID appeared", "PID reused"} {
 		t.Run(kind, func(t *testing.T) {
 			root := t.TempDir()
 			id := strings.Repeat("a", 64)
@@ -324,6 +333,22 @@ func TestReadENPUDeviceStatsProcessErrors(t *testing.T) {
 				if err := os.Remove(filepath.Join(root, "100", "cgroup")); err != nil {
 					t.Fatal(err)
 				}
+			case "malformed cgroup":
+				if err := os.WriteFile(filepath.Join(root, "100", "cgroup"), []byte("invalid cgroup\n"), 0644); err != nil {
+					t.Fatal(err)
+				}
+			case "missing stat":
+				f.beforeProcesses = func(int32) {
+					if err := os.Remove(filepath.Join(root, "100", "stat")); err != nil {
+						t.Fatal(err)
+					}
+				}
+			case "malformed stat":
+				f.beforeProcesses = func(int32) {
+					if err := os.WriteFile(filepath.Join(root, "100", "stat"), []byte("invalid stat\n"), 0644); err != nil {
+						t.Fatal(err)
+					}
+				}
 			case "PID appeared":
 				f.beforeProcesses = func(int32) { enpuDCMIWriteProc(t, root, 101, id, "1234") }
 				f.processes[15].DevProcArray[0].Pid = 101
@@ -339,6 +364,131 @@ func TestReadENPUDeviceStatsProcessErrors(t *testing.T) {
 			}
 			if kind == "missing proc root" && f.calls["processes"] != 0 {
 				t.Fatal("queried PID list without initial process snapshot")
+			}
+		})
+	}
+}
+
+func TestReadENPUDeviceStatsExitedProcess(t *testing.T) {
+	for _, phase := range []string{"before snapshot", "after snapshot"} {
+		t.Run(phase, func(t *testing.T) {
+			root := t.TempDir()
+			enpuDCMIWriteProcView(t, root)
+			live, exited := strings.Repeat("a", 64), strings.Repeat("b", 64)
+			enpuDCMIWriteProc(t, root, 100, exited, "1234")
+			enpuDCMIWriteProc(t, root, 101, live, "1235")
+			enpuDCMIWriteProc(t, root, 102, live, "1236")
+			f := newENPUFakeSDK(t)
+			f.processes[15] = &common.DevProcessInfo{ProcNum: 3, DevProcArray: []common.DevProcInfo{
+				{Pid: 101, MemUsage: 1.5}, {Pid: 100, MemUsage: 247.3125}, {Pid: 102, MemUsage: 2.25},
+			}}
+			exit := func(int32) {
+				if err := os.RemoveAll(filepath.Join(root, "100")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if phase == "before snapshot" {
+				exit(15)
+			} else {
+				f.beforeProcesses = exit
+			}
+			got, err := readENPUDeviceStats(f, f.hbm, root, []enpuAllocation{{PhysicalID: 15, ContainerID: live}})
+			if err != nil || len(got) != 1 || got[0].MemoryErr != nil {
+				t.Fatalf("normal exit failed the DIE sample: %v, %v", got, err)
+			}
+			if len(got[0].MemoryByContainer) != 1 || got[0].MemoryByContainer[live] != 3.75*common.UnitMB {
+				t.Fatalf("live memory was lost or stale memory retained: %v", got[0].MemoryByContainer)
+			}
+		})
+	}
+}
+
+func TestENPUContainerMemoryExitAfterCgroupRead(t *testing.T) {
+	root := t.TempDir()
+	enpuDCMIWriteProcView(t, root)
+	id := strings.Repeat("a", 64)
+	enpuDCMIWriteProc(t, root, 100, id, "1234")
+	enpuDCMIWriteProc(t, root, 101, id, "1235")
+	starts, err := enpuProcessStarts(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cgroup := filepath.Join(root, "100", "cgroup")
+	if err := os.Remove(cgroup); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(cgroup, 0600); err != nil {
+		t.Fatal(err)
+	}
+	written := make(chan error, 1)
+	go func() {
+		f, err := os.OpenFile(cgroup, os.O_WRONLY, 0600)
+		if err != nil {
+			written <- err
+			return
+		}
+		defer func() {
+			_ = f.Close()
+		}()
+		if err := os.RemoveAll(filepath.Join(root, "100")); err != nil {
+			written <- err
+			return
+		}
+		_, err = fmt.Fprintf(f, "0::/system.slice/docker-%s.scope\n", id)
+		written <- err
+	}()
+	info := &common.DevProcessInfo{ProcNum: 2, DevProcArray: []common.DevProcInfo{{Pid: 100, MemUsage: 8}, {Pid: 101, MemUsage: 2}}}
+	got, err := enpuContainerMemory(info, root, starts)
+	if writeErr := <-written; writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	if err != nil || len(got) != 1 || got[id] != 2*common.UnitMB {
+		t.Fatalf("exit between cgroup and stat reads lost live memory: %v, %v", got, err)
+	}
+}
+
+func TestReadENPUDeviceStatsLostProcView(t *testing.T) {
+	for _, emptyMountpoint := range []bool{false, true} {
+		t.Run(fmt.Sprintf("empty_mountpoint=%t", emptyMountpoint), func(t *testing.T) {
+			root := t.TempDir()
+			enpuDCMIWriteProcView(t, root)
+			enpuDCMIWriteProc(t, root, 100, strings.Repeat("a", 64), "1234")
+			f := newENPUFakeSDK(t)
+			f.processes[15] = &common.DevProcessInfo{ProcNum: 1, DevProcArray: []common.DevProcInfo{{Pid: 100, MemUsage: 8}}}
+			f.beforeProcesses = func(int32) {
+				if err := os.RemoveAll(root); err != nil {
+					t.Fatal(err)
+				}
+				if emptyMountpoint {
+					if err := os.Mkdir(root, 0755); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			got, err := readENPUDeviceStats(f, f.hbm, root, []enpuAllocation{{PhysicalID: 15}})
+			if err == nil || len(got) != 1 || got[0].MemoryErr == nil || got[0].MemoryByContainer != nil {
+				t.Fatalf("unavailable proc view exported as zero: %v, %v", got, err)
+			}
+		})
+	}
+}
+
+func TestENPUProcessMissingErrors(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		gone bool
+	}{
+		{syscall.ENOENT, true},
+		{syscall.ESRCH, true},
+		{syscall.EACCES, false},
+		{syscall.EPERM, false},
+		{syscall.ENOTDIR, false},
+		{errors.New("malformed process data"), false},
+	} {
+		t.Run(tc.err.Error(), func(t *testing.T) {
+			err := fmt.Errorf("process read: %w", &os.PathError{Op: "read", Path: "proc/100/stat", Err: tc.err})
+			if got := enpuProcessMissing(err); got != tc.gone {
+				t.Fatalf("missing process classification for %v: %t", err, got)
 			}
 		})
 	}
